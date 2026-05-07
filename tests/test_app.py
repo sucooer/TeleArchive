@@ -1,4 +1,4 @@
-from bot.app import build_runtime_objects
+from bot.app import build_application, build_runtime_objects
 from bot.config import Settings
 
 
@@ -14,6 +14,7 @@ def test_build_runtime_objects_exposes_service_and_storage_root(tmp_path):
         max_concurrent_downloads=1,
         bot_api_base_url="https://api.telegram.org/bot",
         bot_api_base_file_url="https://api.telegram.org/file/bot",
+        bot_api_local_mode=False,
     )
 
     runtime = build_runtime_objects(settings)
@@ -22,3 +23,18 @@ def test_build_runtime_objects_exposes_service_and_storage_root(tmp_path):
     assert "active_downloads" in runtime
     assert runtime["storage_root"] == str(settings.storage_root)
     assert runtime["today_count"] == 0
+
+
+def test_build_application_enables_bot_local_mode_from_settings(monkeypatch, tmp_path):
+    monkeypatch.setenv("BOT_TOKEN", "token")
+    monkeypatch.setenv("OWNER_TELEGRAM_USER_ID", "42")
+    monkeypatch.setenv("STORAGE_ROOT", str(tmp_path / "storage"))
+    monkeypatch.setenv("INDEX_FILE", str(tmp_path / "data" / "index.jsonl"))
+    monkeypatch.setenv("LOG_FILE", str(tmp_path / "logs" / "bot.log"))
+    monkeypatch.setenv("BOT_API_BASE_URL", "http://telegram-bot-api:8081/bot")
+    monkeypatch.setenv("BOT_API_BASE_FILE_URL", "http://telegram-bot-api:8081/file/bot")
+    monkeypatch.setenv("BOT_API_LOCAL_MODE", "1")
+
+    application = build_application()
+
+    assert application.bot.local_mode is True

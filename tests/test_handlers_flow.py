@@ -112,6 +112,21 @@ class ProgressDownloader:
         return self.points[-1] if self.points else 0
 
 
+class PrepareProgressDownloader:
+    async def __call__(self, client, url, part_path, final_path, chunk_size, progress_callback=None, is_cancelled=None, prepare_callback=None, expected_size=None):
+        _ = client
+        _ = url
+        _ = chunk_size
+        _ = progress_callback
+        _ = is_cancelled
+        _ = expected_size
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        final_path.write_bytes(b"payload")
+        if prepare_callback is not None:
+            await prepare_callback(50)
+        return 100
+
+
 @pytest.mark.asyncio
 async def test_archive_service_rejects_non_owner(tmp_path):
     settings = Settings(
@@ -387,6 +402,52 @@ def test_build_prepare_text_without_waiting_seconds():
 
 
 @pytest.mark.asyncio
+async def test_archive_service_updates_prepare_progress_while_local_bot_api_writes_file(tmp_path):
+    settings = Settings(
+        bot_token="token",
+        owner_telegram_user_id=42,
+        storage_root=tmp_path / "storage",
+        index_file=tmp_path / "data" / "index.jsonl",
+        log_file=tmp_path / "logs" / "bot.log",
+        http_timeout=900.0,
+        chunk_size=4096,
+        max_concurrent_downloads=1,
+    )
+    status_factory = RecordingStatusFactory()
+    clock = iter([100.0, 100.0, 100.6])
+    service = ArchiveService(
+        settings=settings,
+        downloader=PrepareProgressDownloader(),
+        logger=None,
+        http_client=None,
+        active_downloads={},
+        task_id_factory=lambda: "task-1",
+        time_source=lambda: next(clock),
+    )
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=42),
+        document=SimpleNamespace(
+            file_id="file-id",
+            file_unique_id="unique-id",
+            file_name="report.pdf",
+            file_size=100,
+        ),
+        video=None,
+        audio=None,
+        voice=None,
+        photo=None,
+        forward_origin=None,
+        date=None,
+        chat=SimpleNamespace(id=99, title="archive", type="private"),
+    )
+
+    await service.handle_message(message=message, bot=StubBot(), status_message_factory=status_factory)
+
+    assert any("分片下载中 report.pdf" in text for text in status_factory.status_message.edits)
+    assert any("50%" in text for text in status_factory.status_message.edits)
+
+
+@pytest.mark.asyncio
 async def test_archive_service_updates_progress_before_large_jump_to_70_percent(tmp_path):
     settings = Settings(
         bot_token="token",
@@ -572,7 +633,13 @@ def test_resolve_download_url_keeps_local_file_path(tmp_path):
     local_file = tmp_path / "telegram-file.bin"
     local_file.write_bytes(b"abc")
 
-    assert resolve_download_url("token", str(local_file)) == str(local_file)
+    assert resolve_download_url("token", str(local_file), "http://local-api:8081/file/bot") == str(local_file)
+
+
+def test_resolve_download_url_uses_configured_file_base_url_for_relative_paths():
+    url = resolve_download_url("token", "documents/report.pdf", "http://local-api:8081/file/bot")
+
+    assert url == "http://local-api:8081/file/bottoken/documents/report.pdf"
 
 
 @pytest.mark.asyncio

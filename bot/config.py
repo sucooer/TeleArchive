@@ -19,6 +19,13 @@ class Settings:
     max_concurrent_downloads: int
     bot_api_base_url: str = "https://api.telegram.org/bot"
     bot_api_base_file_url: str = "https://api.telegram.org/file/bot"
+    bot_api_local_mode: bool = False
+
+
+def parse_bool_env(value: str | None, default: bool = False) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def load_settings() -> Settings:
@@ -42,4 +49,5 @@ def load_settings() -> Settings:
         max_concurrent_downloads=int(os.getenv("MAX_CONCURRENT_DOWNLOADS", "1")),
         bot_api_base_url=os.getenv("BOT_API_BASE_URL", "https://api.telegram.org/bot"),
         bot_api_base_file_url=os.getenv("BOT_API_BASE_FILE_URL", "https://api.telegram.org/file/bot"),
+        bot_api_local_mode=parse_bool_env(os.getenv("BOT_API_LOCAL_MODE")),
     )
