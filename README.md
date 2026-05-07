@@ -1,4 +1,4 @@
-# Telegram 文件转存 Bot
+# TeleArchive
 
 把你转发给机器人的 Telegram 文件自动下载到服务器本地磁盘。
 
@@ -26,7 +26,7 @@ python -m bot.app
 
 ## systemd
 
-复制 `systemd/telegram-file-archive-bot.service` 到 `/etc/systemd/system/` 后启用服务。
+复制 `systemd/telearchive.service` 到 `/etc/systemd/system/` 后启用服务。
 
 ## 大文件下载
 
