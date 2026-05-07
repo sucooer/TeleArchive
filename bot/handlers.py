@@ -38,13 +38,13 @@ def extract_archive_candidate(message) -> ArchiveCandidate | None:
     return None
 
 
-def resolve_download_url(bot_token: str, file_path: str) -> str:
+def resolve_download_url(bot_token: str, file_path: str, base_file_url: str) -> str:
     if Path(file_path).is_file():
         return file_path
     parsed = urlparse(file_path)
     if parsed.scheme and parsed.netloc:
         return file_path
-    return f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
+    return f"{base_file_url.rstrip('/')}{bot_token}/{file_path.lstrip('/')}"
 
 
 def apply_file_path_name_hint(candidate: ArchiveCandidate, file_path: str) -> ArchiveCandidate:
@@ -180,15 +180,40 @@ class ArchiveService:
             telegram_file = None
             for attempt in range(3):
                 try:
+                    if self.logger:
+                        self.logger.info(
+                            "Requesting get_file for task %s, file=%s, size=%s, local_mode=%s, api_base=%s",
+                            task_id,
+                            candidate.original_file_name,
+                            candidate.file_size,
+                            getattr(bot, "local_mode", None),
+                            self.settings.bot_api_base_url,
+                        )
                     telegram_file = await bot.get_file(
                         candidate.telegram_file_id,
                         read_timeout=self.settings.http_timeout,
                         write_timeout=self.settings.http_timeout,
                         pool_timeout=self.settings.http_timeout,
                     )
+                    if self.logger:
+                        self.logger.info(
+                            "get_file succeeded for task %s, file_path=%s",
+                            task_id,
+                            telegram_file.file_path,
+                        )
                     break
                 except Exception as exc:
                     last_get_file_error = exc
+                    if self.logger:
+                        self.logger.warning(
+                            "get_file failed for task %s, file=%s, size=%s, local_mode=%s, api_base=%s: %s",
+                            task_id,
+                            candidate.original_file_name,
+                            candidate.file_size,
+                            getattr(bot, "local_mode", None),
+                            self.settings.bot_api_base_url,
+                            exc,
+                        )
                     if self.active_downloads.get(task_id, {}).get("cancelled", False):
                         raise DownloadCancelled()
                     if not is_temporary_file_unavailable_error(exc) or attempt == 2:
@@ -202,7 +227,11 @@ class ArchiveService:
             if self.active_downloads.get(task_id, {}).get("cancelled", False):
                 raise DownloadCancelled()
             candidate = apply_file_path_name_hint(candidate, telegram_file.file_path)
-            download_url = resolve_download_url(self.settings.bot_token, telegram_file.file_path)
+            download_url = resolve_download_url(
+                self.settings.bot_token,
+                telegram_file.file_path,
+                self.settings.bot_api_base_file_url,
+            )
             storage_plan = build_storage_plan(self.settings.storage_root, candidate)
 
             recent_bytes_start = 0
@@ -244,7 +273,8 @@ class ArchiveService:
                 recent_time_start = current_time
 
             async def prepare_callback(downloaded_bytes: int) -> None:
-                pass
+                current_time = self.time_source() if self.time_source else started_at
+                await _update_status("分片下载中", downloaded_bytes, current_time)
 
             async def progress_callback(downloaded_bytes: int) -> None:
                 current_time = self.time_source() if self.time_source else started_at
@@ -318,6 +348,8 @@ class ArchiveService:
                 self.logger.exception("Download failed")
             self.active_downloads.pop(task_id, None)
             error_text = f"下载失败: {exc}"
+            if self.logger:
+                self.logger.error("Replying failure for task %s: %s", task_id, exc)
             if 'status_message' in locals() and status_message is not None:
                 await self._safe_edit_text(status_message, error_text, reply_markup=None)
                 return None

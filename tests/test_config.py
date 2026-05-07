@@ -14,6 +14,7 @@ def test_load_settings_reads_env(monkeypatch, tmp_path):
     monkeypatch.setenv("MAX_CONCURRENT_DOWNLOADS", "1")
     monkeypatch.setenv("BOT_API_BASE_URL", "https://api.telegram.org/bot")
     monkeypatch.setenv("BOT_API_BASE_FILE_URL", "https://api.telegram.org/file/bot")
+    monkeypatch.setenv("BOT_API_LOCAL_MODE", "1")
 
     settings = load_settings()
 
@@ -28,7 +29,17 @@ def test_load_settings_reads_env(monkeypatch, tmp_path):
         max_concurrent_downloads=1,
         bot_api_base_url="https://api.telegram.org/bot",
         bot_api_base_file_url="https://api.telegram.org/file/bot",
+        bot_api_local_mode=True,
     )
+
+
+def test_load_settings_defaults_bot_api_local_mode_to_false(monkeypatch):
+    monkeypatch.setenv("BOT_TOKEN", "token")
+    monkeypatch.setenv("OWNER_TELEGRAM_USER_ID", "42")
+
+    settings = load_settings()
+
+    assert settings.bot_api_local_mode is False
 
 
 def test_load_settings_requires_bot_token(monkeypatch):

@@ -38,6 +38,7 @@ def build_application():
         .token(settings.bot_token)
         .base_url(settings.bot_api_base_url)
         .base_file_url(settings.bot_api_base_file_url)
+        .local_mode(settings.bot_api_local_mode)
         .build()
     )
     application.bot_data.update(build_runtime_objects(settings))
