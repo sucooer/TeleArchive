@@ -19,6 +19,8 @@ async def stream_download_to_path(
     chunk_size: int,
     progress_callback=None,
     is_cancelled=None,
+    prepare_callback=None,
+    expected_size=None,
 ) -> int:
     bytes_written = 0
     part_path.parent.mkdir(parents=True, exist_ok=True)
@@ -26,6 +28,15 @@ async def stream_download_to_path(
     try:
         source_path = Path(url)
         if source_path.is_file():
+            if expected_size is not None:
+                while source_path.stat().st_size < expected_size:
+                    if is_cancelled is not None and is_cancelled():
+                        raise DownloadCancelled(source_path.stat().st_size)
+                    if prepare_callback is not None:
+                        await prepare_callback(source_path.stat().st_size)
+                    await asyncio.sleep(0.5)
+                if prepare_callback is not None:
+                    await prepare_callback(expected_size)
             with source_path.open("rb") as source, part_path.open("wb") as target:
                 while True:
                     if is_cancelled is not None and is_cancelled():

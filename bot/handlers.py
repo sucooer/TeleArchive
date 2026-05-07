@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from time import monotonic
 from urllib.parse import urlparse
 from uuid import uuid4
 
@@ -76,29 +77,40 @@ def format_size(num_bytes: int) -> str:
 
 
 def build_progress_text(
+    phase_label: str,
     file_name: str,
     downloaded_bytes: int,
     total_bytes: int | None,
     started_at: float,
     now: float,
+    recent_bytes: int | None = None,
+    recent_elapsed: float | None = None,
 ) -> str:
-    elapsed = max(now - started_at, 0.001)
-    speed = downloaded_bytes / elapsed
+    if recent_bytes is not None and recent_elapsed is not None:
+        speed = recent_bytes / max(recent_elapsed, 0.001)
+    else:
+        elapsed = max(now - started_at, 0.001)
+        speed = downloaded_bytes / elapsed
     downloaded_text = format_size(downloaded_bytes)
     speed_text = f"{format_size(int(speed))}/s"
 
     if total_bytes:
         percent = min(downloaded_bytes / total_bytes * 100, 100.0)
-        filled_cells = min(int(percent / 100 * 20), 20)
-        progress_bar = f"{'█' * filled_cells}{'░' * (20 - filled_cells)}"
+        filled_cells = min(int(percent / 100 * 10), 10)
+        progress_bar = f"{'█' * filled_cells}{'░' * (10 - filled_cells)}"
         total_text = format_size(total_bytes)
         return (
-            f"下载中: {file_name}\n"
+            f"{phase_label} {file_name}\n"
             f"{progress_bar} {percent:.0f}%\n"
-            f"{speed_text} | {downloaded_text} / {total_text}"
+            f"⚡ {speed_text} | 📦 {downloaded_text} / {total_text}"
         )
 
-    return f"下载中: {file_name}\n{downloaded_text} | {speed_text}"
+    return f"{phase_label} {file_name}\n⚡ {speed_text} | 📦 {downloaded_text}"
+
+
+def build_prepare_text(file_name: str, started_at: float, now: float) -> str:
+    waited_seconds = max(int(now - started_at), 1)
+    return f"📥 分片下载中 {file_name}\n🧩 正在等待 Telegram 返回可读分片…\n⏳ 已等待 {waited_seconds} 秒"
 
 
 def is_temporary_file_unavailable_error(exc: Exception) -> bool:
@@ -121,7 +133,7 @@ class ArchiveService:
         self.downloader = downloader
         self.logger = logger
         self.http_client = http_client
-        self.time_source = time_source
+        self.time_source = time_source or monotonic
         self.active_downloads = active_downloads if active_downloads is not None else {}
         self.task_id_factory = task_id_factory or (lambda: uuid4().hex)
 
@@ -145,11 +157,19 @@ class ArchiveService:
         try:
             task_id = task_id or self.task_id_factory()
             status_message = None
+            started_at = self.time_source() if self.time_source else 0.0
+            last_progress_update_at = started_at
+            last_progress_percent = 0.0
             if status_message_factory is not None:
                 reply_markup = InlineKeyboardMarkup(
                     [[InlineKeyboardButton("取消下载", callback_data=f"cancel_download:{task_id}")]]
                 )
-                status_message = await status_message_factory(f"开始下载: {candidate.original_file_name or 'file'}", reply_markup=reply_markup)
+                initial_text = build_prepare_text(
+                    candidate.original_file_name or "file",
+                    started_at,
+                    started_at,
+                )
+                status_message = await status_message_factory(initial_text, reply_markup=reply_markup)
                 self.active_downloads[task_id] = {
                     "cancelled": False,
                     "status_message": status_message,
@@ -185,13 +205,74 @@ class ArchiveService:
             download_url = resolve_download_url(self.settings.bot_token, telegram_file.file_path)
             storage_plan = build_storage_plan(self.settings.storage_root, candidate)
 
+            recent_bytes_start = 0
+            recent_time_start = started_at
+
+            async def _update_status(phase_label: str, downloaded_bytes: int, current_time: float) -> None:
+                nonlocal last_progress_update_at, last_progress_percent, recent_bytes_start, recent_time_start
+                if status_message is None:
+                    return
+                if self.active_downloads.get(task_id, {}).get("cancelled", False):
+                    return
+                current_percent = 0.0
+                if candidate.file_size:
+                    current_percent = min(downloaded_bytes / candidate.file_size * 100, 100.0)
+
+                should_update_by_time = current_time - last_progress_update_at >= 0.5
+                should_update_by_percent = candidate.file_size is not None and current_percent - last_progress_percent >= 1.0
+                should_update_by_bytes = downloaded_bytes - recent_bytes_start >= 8 * 1024 * 1024
+                if not should_update_by_time and not should_update_by_percent and not should_update_by_bytes:
+                    return
+
+                reply_markup = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("取消下载", callback_data=f"cancel_download:{task_id}")]]
+                )
+                progress_text = build_progress_text(
+                    phase_label,
+                    candidate.original_file_name or "file",
+                    downloaded_bytes,
+                    candidate.file_size,
+                    started_at,
+                    current_time,
+                    recent_bytes=downloaded_bytes - recent_bytes_start,
+                    recent_elapsed=current_time - recent_time_start,
+                )
+                await self._safe_edit_text(status_message, progress_text, reply_markup=reply_markup)
+                last_progress_update_at = current_time
+                last_progress_percent = current_percent
+                recent_bytes_start = downloaded_bytes
+                recent_time_start = current_time
+
+            async def prepare_callback(downloaded_bytes: int) -> None:
+                current_time = self.time_source() if self.time_source else started_at
+                if status_message is None:
+                    return
+                if self.active_downloads.get(task_id, {}).get("cancelled", False):
+                    return
+                reply_markup = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("取消下载", callback_data=f"cancel_download:{task_id}")]]
+                )
+                prepare_text = build_prepare_text(
+                    candidate.original_file_name or "file",
+                    started_at,
+                    current_time,
+                )
+                await self._safe_edit_text(status_message, prepare_text, reply_markup=reply_markup)
+
+            async def progress_callback(downloaded_bytes: int) -> None:
+                current_time = self.time_source() if self.time_source else started_at
+                await _update_status("合并中", downloaded_bytes, current_time)
+
             bytes_written = await self.downloader(
                 client=self.http_client,
                 url=download_url,
                 part_path=storage_plan.part_path,
                 final_path=storage_plan.final_path,
                 chunk_size=self.settings.chunk_size,
+                progress_callback=progress_callback,
                 is_cancelled=lambda: self.active_downloads.get(task_id, {}).get("cancelled", False),
+                prepare_callback=prepare_callback,
+                expected_size=candidate.file_size,
             )
             record = {
                 "downloaded_at": datetime.now(timezone.utc).isoformat(),
@@ -211,7 +292,7 @@ class ArchiveService:
             if self.logger:
                 self.logger.info("Saved file to %s", storage_plan.final_path)
 
-            result_text = f"已保存: {storage_plan.final_path.name}\n大小: {format_size(record['file_size'])}\n目录: {storage_plan.final_path.parent.name}"
+            result_text = f"✅ 已保存: {storage_plan.final_path.name}\n📦 大小: {format_size(record['file_size'])}\n📁 目录: {storage_plan.final_path.parent.name}"
             self.active_downloads.pop(task_id, None)
             if status_message is not None:
                 await self._safe_edit_text(status_message, result_text, reply_markup=None)

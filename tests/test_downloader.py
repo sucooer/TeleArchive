@@ -208,3 +208,36 @@ async def test_download_cancelled_exception_contains_written_bytes(tmp_path):
         )
 
     assert exc_info.value.bytes_written == 3
+
+
+@pytest.mark.asyncio
+async def test_stream_download_to_path_reports_prepare_progress_for_local_source(tmp_path):
+    source_path = tmp_path / "source.bin"
+    source_path.write_bytes(b"")
+    final_path = tmp_path / "report.bin"
+    part_path = tmp_path / "report.bin.part"
+    prepare_updates = []
+
+    async def grow_source():
+        await asyncio.sleep(0.1)
+        source_path.write_bytes(b"abc")
+        await asyncio.sleep(0.6)
+        source_path.write_bytes(b"abcdef")
+
+    async def prepare_callback(downloaded_bytes):
+        prepare_updates.append(downloaded_bytes)
+
+    grow_task = asyncio.create_task(grow_source())
+    written = await stream_download_to_path(
+        client=None,
+        url=str(source_path),
+        part_path=part_path,
+        final_path=final_path,
+        chunk_size=3,
+        prepare_callback=prepare_callback,
+        expected_size=6,
+    )
+    await grow_task
+
+    assert written == 6
+    assert prepare_updates[-1] == 6

@@ -9,9 +9,11 @@ from bot.indexer import count_records_for_day
 
 
 class ExplodingDownloader:
-    async def __call__(self, client, url, part_path, final_path, chunk_size, progress_callback=None, is_cancelled=None):
+    async def __call__(self, client, url, part_path, final_path, chunk_size, progress_callback=None, is_cancelled=None, prepare_callback=None, expected_size=None):
         _ = progress_callback
         _ = is_cancelled
+        _ = prepare_callback
+        _ = expected_size
         raise RuntimeError("download failed")
 
 
