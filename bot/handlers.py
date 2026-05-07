@@ -159,6 +159,7 @@ class ArchiveService:
             status_message = None
             started_at = self.time_source() if self.time_source else 0.0
             last_progress_update_at = started_at
+            last_prepare_update_at = started_at
             last_progress_percent = 0.0
             if status_message_factory is not None:
                 reply_markup = InlineKeyboardMarkup(
@@ -244,10 +245,13 @@ class ArchiveService:
                 recent_time_start = current_time
 
             async def prepare_callback(downloaded_bytes: int) -> None:
+                nonlocal last_prepare_update_at
                 current_time = self.time_source() if self.time_source else started_at
                 if status_message is None:
                     return
                 if self.active_downloads.get(task_id, {}).get("cancelled", False):
+                    return
+                if current_time - last_prepare_update_at < 1.0:
                     return
                 reply_markup = InlineKeyboardMarkup(
                     [[InlineKeyboardButton("取消下载", callback_data=f"cancel_download:{task_id}")]]
@@ -258,6 +262,7 @@ class ArchiveService:
                     current_time,
                 )
                 await self._safe_edit_text(status_message, prepare_text, reply_markup=reply_markup)
+                last_prepare_update_at = current_time
 
             async def progress_callback(downloaded_bytes: int) -> None:
                 current_time = self.time_source() if self.time_source else started_at
