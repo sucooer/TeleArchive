@@ -188,3 +188,23 @@ async def test_stream_download_to_path_stops_when_cancelled_and_removes_part_fil
 
     assert not part_path.exists()
     assert not final_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_download_cancelled_exception_contains_written_bytes(tmp_path):
+    final_path = tmp_path / "report.pdf"
+    part_path = tmp_path / "report.pdf.part"
+    client = FakeClient(FakeResponse([b"abc", b"def"]))
+    checks = iter([False, True])
+
+    with pytest.raises(DownloadCancelled) as exc_info:
+        await stream_download_to_path(
+            client=client,
+            url="https://example.test/file",
+            part_path=part_path,
+            final_path=final_path,
+            chunk_size=3,
+            is_cancelled=lambda: next(checks),
+        )
+
+    assert exc_info.value.bytes_written == 3

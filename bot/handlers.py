@@ -5,7 +5,11 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
+from uuid import uuid4
 
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+from bot.downloader import DownloadCancelled
 from bot.indexer import append_index_record
 from bot.storage import build_storage_plan
 from bot.types import ArchiveCandidate
@@ -103,14 +107,32 @@ def is_temporary_file_unavailable_error(exc: Exception) -> bool:
 
 
 class ArchiveService:
-    def __init__(self, settings, downloader, logger, http_client, time_source=None):
+    def __init__(
+        self,
+        settings,
+        downloader,
+        logger,
+        http_client,
+        time_source=None,
+        active_downloads=None,
+        task_id_factory=None,
+    ):
         self.settings = settings
         self.downloader = downloader
         self.logger = logger
         self.http_client = http_client
         self.time_source = time_source
+        self.active_downloads = active_downloads if active_downloads is not None else {}
+        self.task_id_factory = task_id_factory or (lambda: uuid4().hex)
 
-    async def handle_message(self, message, bot, progress_message_factory=None, task_id=None) -> str | None:
+    async def _safe_edit_text(self, status_message, text: str, reply_markup=None) -> None:
+        try:
+            await status_message.edit_text(text, reply_markup=reply_markup)
+        except Exception:
+            if self.logger:
+                self.logger.warning("Status message update failed", exc_info=True)
+
+    async def handle_message(self, message, bot, status_message_factory=None, task_id=None) -> str | None:
         if message.from_user.id != self.settings.owner_telegram_user_id:
             if self.logger:
                 self.logger.info("Rejected user %s", message.from_user.id)
@@ -121,6 +143,19 @@ class ArchiveService:
             return "请转发带文件的消息"
 
         try:
+            task_id = task_id or self.task_id_factory()
+            status_message = None
+            if status_message_factory is not None:
+                reply_markup = InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("取消下载", callback_data=f"cancel_download:{task_id}")]]
+                )
+                status_message = await status_message_factory(f"开始下载: {candidate.original_file_name or 'file'}", reply_markup=reply_markup)
+                self.active_downloads[task_id] = {
+                    "cancelled": False,
+                    "status_message": status_message,
+                    "task": None,
+                }
+
             last_get_file_error = None
             telegram_file = None
             for attempt in range(3):
@@ -134,14 +169,18 @@ class ArchiveService:
                     break
                 except Exception as exc:
                     last_get_file_error = exc
+                    if self.active_downloads.get(task_id, {}).get("cancelled", False):
+                        raise DownloadCancelled()
                     if not is_temporary_file_unavailable_error(exc) or attempt == 2:
                         raise
                     if self.logger:
-                        self.logger.warning("Temporary get_file failure, retry %s: %s", attempt + 1, exc)
+                        self.logger.warning("Temporary get_file failure for task %s, retry %s: %s", task_id, attempt + 1, exc)
                     await asyncio.sleep(1)
 
             if telegram_file is None and last_get_file_error is not None:
                 raise last_get_file_error
+            if self.active_downloads.get(task_id, {}).get("cancelled", False):
+                raise DownloadCancelled()
             candidate = apply_file_path_name_hint(candidate, telegram_file.file_path)
             download_url = resolve_download_url(self.settings.bot_token, telegram_file.file_path)
             storage_plan = build_storage_plan(self.settings.storage_root, candidate)
@@ -152,6 +191,7 @@ class ArchiveService:
                 part_path=storage_plan.part_path,
                 final_path=storage_plan.final_path,
                 chunk_size=self.settings.chunk_size,
+                is_cancelled=lambda: self.active_downloads.get(task_id, {}).get("cancelled", False),
             )
             record = {
                 "downloaded_at": datetime.now(timezone.utc).isoformat(),
@@ -171,11 +211,49 @@ class ArchiveService:
             if self.logger:
                 self.logger.info("Saved file to %s", storage_plan.final_path)
 
-            return f"已保存: {storage_plan.final_path.name}\n大小: {format_size(record['file_size'])}\n目录: {storage_plan.final_path.parent.name}"
+            result_text = f"已保存: {storage_plan.final_path.name}\n大小: {format_size(record['file_size'])}\n目录: {storage_plan.final_path.parent.name}"
+            self.active_downloads.pop(task_id, None)
+            if status_message is not None:
+                await self._safe_edit_text(status_message, result_text, reply_markup=None)
+                return None
+            return result_text
+        except DownloadCancelled as exc:
+            if self.logger:
+                self.logger.info("Download cancelled for task %s after %s bytes", task_id, exc.bytes_written)
+            self.active_downloads.pop(task_id, None)
+            if 'status_message' in locals() and status_message is not None:
+                await self._safe_edit_text(status_message, "已取消", reply_markup=None)
+                if self.logger:
+                    self.logger.info("Cancel message set to cancelled for task %s", task_id)
+                return None
+            return "已取消"
+        except asyncio.CancelledError:
+            if self.logger:
+                self.logger.info("Download task cancelled for task %s", task_id)
+            self.active_downloads.pop(task_id, None)
+            if 'status_message' in locals() and status_message is not None:
+                await self._safe_edit_text(status_message, "已取消", reply_markup=None)
+                if self.logger:
+                    self.logger.info("Cancel message set to cancelled for task %s", task_id)
+                return None
+            return "已取消"
         except Exception as exc:
+            if self.active_downloads.get(task_id, {}).get("cancelled", False):
+                self.active_downloads.pop(task_id, None)
+                if 'status_message' in locals() and status_message is not None:
+                    await self._safe_edit_text(status_message, "已取消", reply_markup=None)
+                    if self.logger:
+                        self.logger.info("Cancel message set to cancelled for task %s", task_id)
+                    return None
+                return "已取消"
             if self.logger:
                 self.logger.exception("Download failed")
-            return f"下载失败: {exc}"
+            self.active_downloads.pop(task_id, None)
+            error_text = f"下载失败: {exc}"
+            if 'status_message' in locals() and status_message is not None:
+                await self._safe_edit_text(status_message, error_text, reply_markup=None)
+                return None
+            return error_text
 
 
 async def handle_start(update, context) -> None:
@@ -191,10 +269,46 @@ async def handle_status(update, context) -> None:
 
 async def handle_archive_message(update, context) -> None:
     service = context.bot_data["archive_service"]
-    result = await service.handle_message(
-        update.message,
-        context.bot,
-        progress_message_factory=update.message.reply_text,
-    )
-    if result is not None:
-        await update.message.reply_text(result)
+    task_id = service.task_id_factory()
+    active_downloads = context.bot_data.setdefault("active_downloads", {})
+
+    async def run_download():
+        result = await service.handle_message(
+            update.message,
+            context.bot,
+            status_message_factory=update.message.reply_text,
+            task_id=task_id,
+        )
+        if result is not None:
+            await update.message.reply_text(result)
+
+    task = context.application.create_task(run_download())
+    if task_id in active_downloads:
+        active_downloads[task_id]["task"] = task
+    else:
+        active_downloads[task_id] = {"cancelled": False, "task": task}
+
+
+async def handle_cancel_download(update, context) -> None:
+    callback_query = update.callback_query
+    task_id = callback_query.data.split(":", 1)[1]
+    task = context.bot_data["active_downloads"].get(task_id)
+    if task is None:
+        await callback_query.answer("任务已结束")
+        return
+
+    if task.get("cancelled"):
+        await callback_query.answer("正在取消下载…")
+        return
+
+    task["cancelled"] = True
+    status_message = task.get("status_message")
+    if status_message is not None:
+        await status_message.edit_text("已取消", reply_markup=None)
+        archive_service = context.bot_data.get("archive_service")
+        if archive_service and archive_service.logger:
+            archive_service.logger.info("Cancel message set to cancelled immediately for task %s", task_id)
+    running_task = task.get("task")
+    if running_task is not None:
+        running_task.cancel()
+    await callback_query.answer("正在取消下载…")

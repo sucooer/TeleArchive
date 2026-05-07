@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from telegram import InlineKeyboardMarkup
 
 from bot.config import Settings
 from bot.handlers import ArchiveService, resolve_download_url
@@ -11,8 +12,10 @@ class StubDownloader:
     def __init__(self):
         self.calls = []
 
-    async def __call__(self, client, url, part_path, final_path, chunk_size, progress_callback=None):
+    async def __call__(self, client, url, part_path, final_path, chunk_size, progress_callback=None, is_cancelled=None):
         self.calls.append((url, part_path, final_path, chunk_size))
+        _ = progress_callback
+        _ = is_cancelled
         final_path.parent.mkdir(parents=True, exist_ok=True)
         final_path.write_bytes(b"payload")
         return 7
@@ -58,6 +61,30 @@ class RecordingTimeoutBot:
     async def get_file(self, file_id, **kwargs):
         self.kwargs = kwargs
         return StubBotFile()
+
+
+class RecordingStatusMessage:
+    def __init__(self, text):
+        self.text = text
+        self.edits = []
+        self.reply_markup = None
+
+    async def edit_text(self, text, **kwargs):
+        self.text = text
+        self.edits.append(text)
+        self.reply_markup = kwargs.get("reply_markup")
+
+
+class RecordingStatusFactory:
+    def __init__(self):
+        self.calls = []
+        self.status_message = None
+
+    async def __call__(self, text, **kwargs):
+        self.calls.append((text, kwargs))
+        self.status_message = RecordingStatusMessage(text)
+        self.status_message.reply_markup = kwargs.get("reply_markup")
+        return self.status_message
 
 
 @pytest.mark.asyncio
@@ -149,6 +176,111 @@ async def test_archive_service_downloads_and_indexes_file(tmp_path):
     assert record["telegram_file_id"] == "file-id"
     assert record["source_chat_id"] == 99
     assert "report.pdf" in record["saved_file_name"]
+
+
+@pytest.mark.asyncio
+async def test_archive_service_status_message_contains_cancel_button(tmp_path):
+    settings = Settings(
+        bot_token="token",
+        owner_telegram_user_id=42,
+        storage_root=tmp_path / "storage",
+        index_file=tmp_path / "data" / "index.jsonl",
+        log_file=tmp_path / "logs" / "bot.log",
+        http_timeout=900.0,
+        chunk_size=4096,
+        max_concurrent_downloads=1,
+    )
+    status_factory = RecordingStatusFactory()
+    active_downloads = {}
+    service = ArchiveService(
+        settings=settings,
+        downloader=StubDownloader(),
+        logger=None,
+        http_client=None,
+        active_downloads=active_downloads,
+        task_id_factory=lambda: "task-1",
+    )
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=42),
+        document=SimpleNamespace(
+            file_id="file-id",
+            file_unique_id="unique-id",
+            file_name="report.pdf",
+            file_size=7,
+        ),
+        video=None,
+        audio=None,
+        voice=None,
+        photo=None,
+        forward_origin=None,
+        date=None,
+        chat=SimpleNamespace(id=99, title="archive", type="private"),
+    )
+
+    await service.handle_message(message=message, bot=StubBot(), status_message_factory=status_factory)
+
+    reply_markup = status_factory.calls[0][1]["reply_markup"]
+    assert isinstance(reply_markup, InlineKeyboardMarkup)
+    assert reply_markup.inline_keyboard[0][0].text == "取消下载"
+
+
+@pytest.mark.asyncio
+async def test_archive_service_cancellation_edits_message_and_clears_task(tmp_path):
+    settings = Settings(
+        bot_token="token",
+        owner_telegram_user_id=42,
+        storage_root=tmp_path / "storage",
+        index_file=tmp_path / "data" / "index.jsonl",
+        log_file=tmp_path / "logs" / "bot.log",
+        http_timeout=900.0,
+        chunk_size=4096,
+        max_concurrent_downloads=1,
+    )
+
+    class CancellingDownloader:
+        async def __call__(self, client, url, part_path, final_path, chunk_size, is_cancelled=None):
+            part_path.parent.mkdir(parents=True, exist_ok=True)
+            part_path.write_bytes(b"partial")
+            active_downloads["task-1"]["cancelled"] = True
+            if is_cancelled and is_cancelled():
+                from bot.downloader import DownloadCancelled
+
+                raise DownloadCancelled()
+            return 3
+
+    status_factory = RecordingStatusFactory()
+    active_downloads = {}
+    service = ArchiveService(
+        settings=settings,
+        downloader=CancellingDownloader(),
+        logger=None,
+        http_client=None,
+        active_downloads=active_downloads,
+        task_id_factory=lambda: "task-1",
+    )
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=42),
+        document=SimpleNamespace(
+            file_id="file-id",
+            file_unique_id="unique-id",
+            file_name="report.pdf",
+            file_size=7,
+        ),
+        video=None,
+        audio=None,
+        voice=None,
+        photo=None,
+        forward_origin=None,
+        date=None,
+        chat=SimpleNamespace(id=99, title="archive", type="private"),
+    )
+
+    result = await service.handle_message(message=message, bot=StubBot(), status_message_factory=status_factory)
+
+    assert result is None
+    assert status_factory.status_message.edits[-1] == "已取消"
+    assert status_factory.status_message.reply_markup is None
+    assert active_downloads == {}
 
 
 
@@ -271,4 +403,3 @@ async def test_archive_service_passes_extended_timeouts_to_get_file(tmp_path):
     assert bot.kwargs["read_timeout"] == 900.0
     assert bot.kwargs["write_timeout"] == 900.0
     assert bot.kwargs["pool_timeout"] == 900.0
-

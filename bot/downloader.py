@@ -6,7 +6,9 @@ from pathlib import Path
 
 
 class DownloadCancelled(Exception):
-    pass
+    def __init__(self, bytes_written: int = 0):
+        super().__init__("download cancelled")
+        self.bytes_written = bytes_written
 
 
 async def stream_download_to_path(
@@ -27,7 +29,7 @@ async def stream_download_to_path(
             with source_path.open("rb") as source, part_path.open("wb") as target:
                 while True:
                     if is_cancelled is not None and is_cancelled():
-                        raise DownloadCancelled()
+                        raise DownloadCancelled(bytes_written)
                     chunk = source.read(chunk_size)
                     if not chunk:
                         break
@@ -46,7 +48,7 @@ async def stream_download_to_path(
             with part_path.open("wb") as handle:
                 async for chunk in response.aiter_bytes(chunk_size=chunk_size):
                     if is_cancelled is not None and is_cancelled():
-                        raise DownloadCancelled()
+                        raise DownloadCancelled(bytes_written)
                     if not chunk:
                         continue
                     handle.write(chunk)

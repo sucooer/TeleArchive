@@ -19,5 +19,6 @@ def test_build_runtime_objects_exposes_service_and_storage_root(tmp_path):
     runtime = build_runtime_objects(settings)
 
     assert "archive_service" in runtime
+    assert "active_downloads" in runtime
     assert runtime["storage_root"] == str(settings.storage_root)
     assert runtime["today_count"] == 0
