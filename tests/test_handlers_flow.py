@@ -249,7 +249,6 @@ async def test_archive_service_status_message_contains_cancel_button(tmp_path):
     assert reply_markup.inline_keyboard[0][0].text == "取消下载"
     assert status_factory.calls[0][0].startswith("📥 分片下载中 ")
     assert "🧩 正在等待 Telegram 返回可读分片…" in status_factory.calls[0][0]
-    assert "⏳ 已等待 1 秒" in status_factory.calls[0][0]
 
 
 @pytest.mark.asyncio
@@ -381,10 +380,10 @@ def test_build_progress_text_uses_reasonable_speed_from_recent_window():
     assert "67%" in text
 
 
-def test_build_prepare_text_shows_waiting_seconds():
+def test_build_prepare_text_without_waiting_seconds():
     text = build_prepare_text("report.bin", started_at=100.0, now=112.4)
 
-    assert text == "📥 分片下载中 report.bin\n🧩 正在等待 Telegram 返回可读分片…\n⏳ 已等待 12 秒"
+    assert text == "📥 分片下载中 report.bin\n🧩 正在等待 Telegram 返回可读分片…"
 
 
 @pytest.mark.asyncio

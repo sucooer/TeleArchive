@@ -109,8 +109,7 @@ def build_progress_text(
 
 
 def build_prepare_text(file_name: str, started_at: float, now: float) -> str:
-    waited_seconds = max(int(now - started_at), 1)
-    return f"📥 分片下载中 {file_name}\n🧩 正在等待 Telegram 返回可读分片…\n⏳ 已等待 {waited_seconds} 秒"
+    return f"📥 分片下载中 {file_name}\n🧩 正在等待 Telegram 返回可读分片…"
 
 
 def is_temporary_file_unavailable_error(exc: Exception) -> bool:
@@ -245,24 +244,7 @@ class ArchiveService:
                 recent_time_start = current_time
 
             async def prepare_callback(downloaded_bytes: int) -> None:
-                nonlocal last_prepare_update_at
-                current_time = self.time_source() if self.time_source else started_at
-                if status_message is None:
-                    return
-                if self.active_downloads.get(task_id, {}).get("cancelled", False):
-                    return
-                if current_time - last_prepare_update_at < 1.0:
-                    return
-                reply_markup = InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("取消下载", callback_data=f"cancel_download:{task_id}")]]
-                )
-                prepare_text = build_prepare_text(
-                    candidate.original_file_name or "file",
-                    started_at,
-                    current_time,
-                )
-                await self._safe_edit_text(status_message, prepare_text, reply_markup=reply_markup)
-                last_prepare_update_at = current_time
+                pass
 
             async def progress_callback(downloaded_bytes: int) -> None:
                 current_time = self.time_source() if self.time_source else started_at
