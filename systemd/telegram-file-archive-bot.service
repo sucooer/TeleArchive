@@ -1,0 +1,14 @@
+[Unit]
+Description=Telegram File Archive Bot
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/bot
+EnvironmentFile=/home/bot/.env
+ExecStart=/home/bot/.venv/bin/python -m bot.app
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
